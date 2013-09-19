@@ -1,0 +1,236 @@
+Imports System.Text
+Imports System.Net.Sockets
+Imports System.Net
+
+Public Class Form1
+
+    Dim WithEvents Svr As TcpListener
+    Dim threadListen As Threading.Thread
+    Dim threadCount As Integer
+    Dim server_injek_ip As String = "202.152.240.50"
+    Dim server_injek_port = 8080
+    Dim tid As Integer = 0
+    'Dim endHeader() As Byte = {13, 13}
+    'Const cr = 13, lf = 10, bufZ = 1024, maxloop = 20
+    Dim thrC As New List(Of Threading.Thread), thrS As New List(Of Threading.Thread)
+
+    Dim injectXLStr As String = "DELETE http://m.facebook.com/ HTTP/1.1" & vbCr & _
+     "Host: m.facebook.com " & vbCr & vbCr
+    Dim InjectXLByte As Byte() = Encoding.ASCII.GetBytes(injectXLStr)
+
+    Const about = "By: Klampok_Child, www.developer-id.com"
+
+    Private Sub Button1_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Button1.Click
+        If Button1.Text = "start" Then
+            Button1.Text = "stop"
+            Dim ipc As Byte() = New Byte() {127, 0, 0, 1}
+
+            Dim ip = New System.Net.IPEndPoint(New System.Net.IPAddress(ipc), TextBox1.Text)
+            Svr = New TcpListener(ip)
+            Try
+                Svr.Start()
+                threadListen = New Threading.Thread(AddressOf StartListen)
+                threadListen.Start()
+            Catch ex As Exception
+                MsgBox("Error: " & ex.Message)
+            End Try
+
+        Else
+            Button1.Text = "start"
+            Try
+                Svr.Stop()
+            Catch ex As Exception
+            End Try
+
+            For Each t As Threading.Thread In thrC
+                Try
+                    If t.IsAlive Then t.Abort()
+                Catch ex As Exception
+
+                End Try
+            Next
+            For Each t As Threading.Thread In thrS
+                Try
+                    If t.IsAlive Then t.Abort()
+                Catch ex As Exception
+                End Try
+            Next
+        End If
+    End Sub
+
+    Private Sub StartListen()
+        Debug.Print("[Thread Listen] START - " & threadCount)
+        While True
+            Try
+                Dim tc As TcpClient = Svr.AcceptTcpClient
+                Dim thr As New Threading.Thread(AddressOf requestHandler)
+                thr.Start(tc)
+                Debug.Print("[Thread Listen] Accepted : " & tc.ToString)
+            Catch ex As Exception
+                Debug.Print("[Thread Listen] Exception: " & ex.Message)
+                Exit While
+            End Try
+        End While
+        Debug.Print("[Thread Listen] END")
+    End Sub
+
+    Private Sub requestHandler(ByVal cln As TcpClient)
+
+        Dim sck As Socket = konekProxyServer()
+        If sck Is Nothing Then
+            cln.Close()
+            'Debug.Print("  [req] END THREAD " & threadCount & " Ngga konek ke ProxXL")
+        ElseIf sck.Connected Then
+            Dim t As New Threading.Thread(AddressOf transferClientToServer)
+
+            t.Start(New Object() {cln, sck, thrC.Count})
+            thrC.Add(t)
+            t = New Threading.Thread(AddressOf transferServerToClient)
+            t.Start(New Object() {cln, sck, thrS.Count})
+            thrS.Add(t)
+        Else
+            cln.Close()
+        End If
+    End Sub
+
+    Private Sub transferClientToServer(ByVal param As Object())
+        Dim cln As TcpClient = param(0)
+        Dim sck As Socket = param(1)
+        Dim id As Integer = param(2)
+        'transfer dari client, ke proxy server
+        Debug.Print("C >--> S {" & id & "}")
+        Dim recv As Integer = 0
+        Dim terus = True
+        Dim pos = 0, pos1 = 0, btSent = 0
+        Dim res As String = ""
+        Do
+            Try
+                Do
+                    Dim b(cln.SendBufferSize) As Byte
+                    recv = cln.GetStream.Read(b, 0, b.Length)
+                    sck.Send(b, recv, SocketFlags.None)
+                    'Debug.Print("C >--> S {" & id & "}: sent " & recv & " bytes")
+                    pos += 1
+                    btSent += recv
+                    If recv < 2 Then
+                        'Debug.Print("C -<- S {" & id & "}: Small Packed, exit!")
+                        If Not cln Is Nothing Then
+                            If cln.Connected Then cln.Close()
+                        End If
+                        Exit Do
+                    End If
+                Loop While cln.GetStream.DataAvailable
+
+            Catch ex As Exception
+                'Debug.Print("C >--> S {" & id & "}: END ERROR " & ex.Message)
+                If cln.Connected Then cln.Close()
+                Exit Do
+            End Try
+
+        Loop While terus And cln.Connected And sck.Connected
+        Try
+            If Not thrS(id) Is Nothing Then
+                If thrS(id).IsAlive Then thrS(id).Abort()
+            End If
+            If cln.Connected Then cln.Close()
+        Catch ex As Exception
+
+        End Try
+        Try
+            If Not sck Is Nothing Then
+                If sck.Connected Then sck.Close()
+            End If
+        Catch ex As Exception
+
+        End Try
+        'Debug.Print("C >--> S {" & id & "}: END, Total " & btSent & " bytes, loop " & pos)
+    End Sub
+
+    Private Sub transferServerToClient(ByVal param As Object())
+        Dim cln As TcpClient = param(0)
+        Dim sck As Socket = param(1)
+        Dim id As Integer = param(2)
+        Debug.Print("C -<- S {" & id & "}")
+        Dim pos = 0, pos1 = 0, btRecv = 0
+        Do
+            Try
+                Dim res As String = ""
+                Do
+                    pos1 += 1
+                    Dim b(sck.ReceiveBufferSize) As Byte
+                    Dim recv = sck.Receive(b)
+                    cln.GetStream.Write(b, 0, recv)
+
+                    btRecv += recv
+                    'Debug.Print("C -<- S {" & id & "}: Received " & recv & " bytes")
+                    If recv < 2 Then
+                        Debug.Print("C -<- S {" & id & "}: Small Packed, exit!")
+                        If Not sck Is Nothing Then
+                            If sck.Connected Then sck.Close()
+                        End If
+                        Exit Do
+                    End If
+                Loop While sck.Available > 0
+
+            Catch ex As Exception
+                Debug.Print("C -<- S {" & id & "}: END ERROR " & ex.Message)
+                If sck.Connected Then sck.Close()
+                Exit Do
+            End Try
+
+        Loop While cln.Connected And sck.Connected
+
+        Try
+            If Not thrC(id) Is Nothing Then
+                If thrC(id).IsAlive Then thrC(id).Abort()
+            End If
+            If Not cln Is Nothing Then
+                If cln.Connected Then cln.Close()
+            End If
+            If sck.Connected Then sck.Close()
+        Catch ex As Exception
+
+        End Try
+        'Debug.Print("C -<- S {" & id & "}: END ,total received " & btRecv & " bytes")
+
+
+    End Sub
+
+    Private Function konekProxyServer() As Socket
+
+        'Konek ke server injek & kirim header injeknya,, returnnya adalah koneksi socket yg siap transfer data
+        Dim sck As New Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+        Dim bytesRec = 0
+        Try
+
+            sck.Connect(server_injek_ip, server_injek_port)
+            sck.Send(InjectXLByte)
+            Dim bytes(sck.ReceiveBufferSize) As Byte
+            bytesRec = sck.Receive(bytes)
+            'Debug.Print("[RECV XL-PROXY] " & bytesRec & " + " & sck.Available & " ***************")
+            If bytesRec <= 2 Then
+                sck.Close()
+                sck = Nothing
+            End If
+        Catch ex As Exception
+            'Debug.WriteLine(" Gagal Konek server, coba lagi. : " & ex.Message)
+            If sck.Connected Then sck.Close()
+            sck = Nothing
+        End Try
+        Return sck
+
+    End Function
+
+    Private Sub PictureBox1_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles PictureBox1.Click
+        System.Diagnostics.Process.Start("http://forum.developer-id.com/forum-trik-internet-gratis")
+
+    End Sub
+
+    Private Sub Button2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Button2.Click
+        System.Diagnostics.Process.Start("https://www.facebook.com/developerId")
+    End Sub
+
+    Private Sub Form1_Disposed(ByVal sender As Object, ByVal e As System.EventArgs) Handles Me.Disposed
+        End
+    End Sub
+End Class
